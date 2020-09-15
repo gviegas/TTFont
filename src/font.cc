@@ -6,6 +6,7 @@
 //
 
 #include <cstdint>
+#include <cmath>
 #include <fstream>
 #include <vector>
 #include <unordered_map>
@@ -75,8 +76,9 @@ class SFNT {
       std::abort();
   }
 
-  // TODO
-  std::unique_ptr<Glyph> scan(wchar_t glyph, uint16_t pts, uint16_t dpi) {
+  /// Produces the bitmap representation of a glyph.
+  /// TODO
+  std::unique_ptr<Glyph> getGlyph(wchar_t glyph, uint16_t pts, uint16_t dpi) {
     Outline<int16_t> outlnF;
     fetch(glyph, outlnF);
     Outline<float> outlnP;
@@ -132,41 +134,7 @@ class SFNT {
     std::wcout << "\n~~~~\n";
 #endif
 
-    ////
-    const float fac = (pts*dpi) / (72.0f*_upem);
-    std::wcout << "\n\n############\n";
-    std::wcout << _xMin << "," << _xMax << " [";
-    std::wcout << _xMin*fac << "," << _xMax*fac << "]\n";
-    std::wcout << _yMin << "," << _yMax << " [";
-    std::wcout << _yMin*fac << "," << _yMax*fac << "]\n";
-    std::wcout << "\n\n";
-
-    uint16_t w = (outlnP.xMax) - (outlnP.xMin) + 1;
-    uint16_t h = (outlnP.yMax) - (outlnP.yMin) + 1;
-    std::wcout << w << "," << h << "\n";
-
-    auto bm = new uint8_t[w*h];
-    //std::memset(bm, 0, w*h);
-    for (uint16_t i = 0; i < w*h; ++i) bm[i] = 0;
-
-    std::for_each(outlnP.comps.begin(), outlnP.comps.end(), [&](auto& comp) {
-      std::for_each(comp.pts.begin(), comp.pts.end(), [&](auto& pt) {
-        uint16_t x = std::get<1>(pt) - outlnP.xMin;
-        uint16_t y = std::get<2>(pt) - outlnP.yMin;
-        std::wcout << "(" << x << "," << y << ")\n";
-        bm[y*w+x] = 255;
-      });
-    });
-
-    for (uint16_t i = 0; i < w*h; ++i) {
-      if (i % w == 0) std::wcout << std::endl;
-      std::wcout << (bm[i] == 0 ? "." : "O") << " ";
-    }
-    std::wcout << "\n\n############\n";
-
-    return std::unique_ptr<Glyph>{new SFNTGlyph{{w, h,}, bm}};
-    ////
-
+    return rasterize(outlnP);
   }
 
  private:
@@ -497,7 +465,7 @@ class SFNT {
   ///
   template<class T>
   struct Component {
-    //static_assert(std::is_numeric<T>, "!is_numeric");
+    static_assert(std::is_arithmetic<T>(), "!is_arithmetic");
     std::vector<uint16_t> cntrEnd; // last point indices, one per contour
     std::vector<std::tuple<bool, T, T>> pts; // <on curve, x, y>
   };
@@ -719,14 +687,119 @@ class SFNT {
     dst.yMin = src.yMin * fac;
     dst.xMax = src.xMax * fac;
     dst.yMax = src.yMax * fac;
-    std::for_each(src.comps.begin(), src.comps.end(), [&](const auto& comp) {
+    std::for_each(src.comps.begin(), src.comps.end(), [&](auto& comp) {
       dst.comps.push_back({});
       dst.comps.back().cntrEnd = comp.cntrEnd;
-      std::for_each(comp.pts.begin(), comp.pts.end(), [&](const auto& pt) {
+      std::for_each(comp.pts.begin(), comp.pts.end(), [&](auto& pt) {
         dst.comps.back().pts.push_back(
           {std::get<0>(pt), std::get<1>(pt)*fac, std::get<2>(pt)*fac});
       });
     });
+  }
+
+  /// Rasterizes a scaled outline.
+  /// TODO: Handle rounding errors.
+  ///
+  std::unique_ptr<Glyph> rasterize(const Outline<float>& outline) {
+    enum Winding { ON = 1, OFF = -1, NONE = 0 };
+    struct Point { float x, y; };
+    struct Segment { Winding wind; Point p1, p2; };
+
+    std::vector<Segment> segs;
+
+    auto addSeg = [&](const Component<float>& comp, uint16_t i, uint16_t j) {
+      auto x1 = std::get<1>(comp.pts[i]);
+      auto y1 = std::get<2>(comp.pts[i]);
+      auto x2 = std::get<1>(comp.pts[j]);
+      auto y2 = std::get<2>(comp.pts[j]);
+      Winding wind;
+      if (y1 < y2)
+        wind = ON;
+      else if (y1 > y2)
+        wind = OFF;
+      else
+        wind = NONE;
+      segs.push_back({wind, {x1, y1}, {x2, y2}});
+    };
+
+    std::for_each(outline.comps.begin(), outline.comps.end(), [&](auto& comp) {
+      uint16_t beg = 0, cur;
+      for (const auto& end : comp.cntrEnd) {
+        cur = beg;
+        while (cur++ < end)
+          addSeg(comp, cur-1, cur);
+        addSeg(comp, end, beg);
+        beg = end+1;
+      }
+    });
+
+#ifdef FONT_DEVEL
+    std::wcout << "\n~~ Segments ~~\n\n";
+    std::for_each(segs.begin(), segs.end(), [](auto& seg) {
+      std::wcout << "._. " << (seg.wind == ON ? "ON " : "OFF ") <<
+        "(" << seg.p1.x << "," << seg.p1.y << ") " <<
+        "(" << seg.p2.x << "," << seg.p2.y << ")\n";
+    });
+    std::wcout << "\n~~~~\n";
+#endif
+
+    auto dir = [](Point p1, Point p2, Point p3) {
+      return (p3.x-p1.x)*(p2.y-p1.y)-(p2.x-p1.x)*(p3.y-p1.y);
+    };
+
+    auto on = [](Point p1, Point p2, Point p3) {
+      return std::min(p1.x, p2.x) <= p3.x && std::max(p1.x, p2.x) >= p3.x &&
+        std::min(p1.y, p2.y) <= p3.y && std::max(p1.y, p2.y) >= p3.y;
+    };
+
+    auto onSegment = [&](const Segment& seg, Point p) {
+      const auto d = dir(seg.p1, seg.p2, p);
+      if (d != 0.0f)
+        return false;
+      return on(seg.p1, seg.p2, p);
+    };
+
+    auto intersects = [&](const Segment& seg, Point p1, Point p2) {
+      const auto d1 = dir(p1, p2, seg.p1);
+      const auto d2 = dir(p1, p2, seg.p2);
+      const auto d3 = dir(seg.p1, seg.p2, p1);
+      const auto d4 = dir(seg.p1, seg.p2, p2);
+      if (((d1 < 0.0f && d2 > 0.0f) || (d1 > 0.0f && d2 < 0.0f)) &&
+        ((d3 < 0.0f && d4 > 0.0f) || (d3 > 0.0f && d4 < 0.0f)))
+      { return true; }
+      if (d1 == 0.0f && on(p1, p2, seg.p1))
+        return true;
+      if (d2 == 0.0f && on(p1, p2, seg.p2))
+        return true;
+      if (d3 == 0.0f && on(seg.p1, seg.p2, p1))
+        return true;
+      if (d4 == 0.0f && on(seg.p1, seg.p2, p2))
+        return true;
+      return false;
+    };
+
+    const uint16_t w = std::ceil(outline.xMax - outline.xMin);
+    const uint16_t h = std::ceil(outline.yMax - outline.yMin);
+    auto bmap = new uint8_t[w*h];
+
+    for (uint16_t y = 0; y < h; ++y) {
+      for (uint16_t x = 0; x < w; ++x) {
+        Point p1 = {x+outline.xMin, y+outline.yMin};
+        Point p2 = {p1.x+65535.0f, p1.y};
+        int wind = 0;
+        for (const auto& seg : segs) {
+          if (onSegment(seg, p1)) {
+            wind = ON;
+            break;
+          }
+          if (intersects(seg, p1, p2))
+            wind += seg.wind;
+        }
+        bmap[y*w+x] = wind != 0 ? 255 : 0;
+      }
+    }
+
+    return std::unique_ptr<Glyph>{new SFNTGlyph{{w, h}, bmap}};
   }
 
   /// Units per em.
@@ -774,7 +847,7 @@ class Font::Impl {
   }
 
   std::unique_ptr<Glyph> getGlyph(wchar_t chr, uint16_t pts, uint16_t dpi) {
-    return _sfnt->scan(chr, pts, dpi);
+    return _sfnt->getGlyph(chr, pts, dpi);
   }
 
  private:

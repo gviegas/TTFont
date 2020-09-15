@@ -77,7 +77,7 @@ void draw(const Glyph& glyph) {
   if (yf_dtable_copyimg(dtb, 0, 2, {0, 1}, &img, &layer) != 0)
     assert(0);
 
-  const YF_dim2 winDim = {gw*20U, gh*20U};
+  const YF_dim2 winDim = {gw, gh};
   YF_window win = yf_window_init(ctx, winDim, "Font");
   assert(win);
 
@@ -117,6 +117,8 @@ void draw(const Glyph& glyph) {
   YF_VIEWPORT_SCISSOR(vp, sciss);
 
   for (;;) {
+    yf_event_poll();
+
     next = yf_window_next(win);
     assert(next >= 0);
 
@@ -145,11 +147,12 @@ int main(int argc, char* argv[]) {
     std::wcout << argv[i] << " ";
   std::wcout << "\n\n";
 
-  const wchar_t chr = argc > 1 ? argv[1][0] : L'+';
+  const wchar_t chr = argc > 1 ? argv[1][0] : L'S';
+  const uint16_t pts = argc > 2 ? std::atoi(argv[2]) : 144;
 
   try {
     Font font{std::getenv("FONT")};
-    auto glyph = font.getGlyph(chr, 34);
+    auto glyph = font.getGlyph(chr, pts);
     draw(*glyph);
   } catch (...) {
     std::wcerr << "ERR: 'FONT' env. not defined\n";
