@@ -687,13 +687,60 @@ class SFNT {
     dst.yMin = src.yMin * fac;
     dst.xMax = src.xMax * fac;
     dst.yMax = src.yMax * fac;
+
     std::for_each(src.comps.begin(), src.comps.end(), [&](auto& comp) {
       dst.comps.push_back({});
-      dst.comps.back().cntrEnd = comp.cntrEnd;
-      std::for_each(comp.pts.begin(), comp.pts.end(), [&](auto& pt) {
-        dst.comps.back().pts.push_back(
-          {std::get<0>(pt), std::get<1>(pt)*fac, std::get<2>(pt)*fac});
-      });
+      auto& it = dst.comps.back();
+      uint16_t beg, cur;
+      beg = cur = 0;
+
+      for (const auto& end : comp.cntrEnd) {
+        do {
+          auto& p1 = comp.pts[cur];
+          if (std::get<0>(p1)) {
+            it.pts.push_back({true, std::get<1>(p1)*fac, std::get<2>(p1)*fac});
+            continue;
+          }
+          auto& p0 = cur == beg ? comp.pts[end] : comp.pts[cur-1];
+          auto& p2 = cur == end ? comp.pts[beg] : comp.pts[cur+1];
+          float x0, y0, x1, y1, x2, y2;
+
+          // missing on-curve points created as needed
+          x1 = std::get<1>(p1)*fac;
+          y1 = std::get<2>(p1)*fac;
+          if (std::get<0>(p0)) {
+            x0 = std::get<1>(p0)*fac;
+            y0 = std::get<2>(p0)*fac;
+          } else {
+            x0 = std::get<1>(p0)*fac*0.5f + x1*0.5f;
+            y0 = std::get<2>(p0)*fac*0.5f + y1*0.5f;
+          }
+          if (std::get<0>(p2)) {
+            x2 = std::get<1>(p2)*fac;
+            y2 = std::get<2>(p2)*fac;
+          } else {
+            x2 = x1*0.5f + std::get<1>(p2)*fac*0.5f;
+            y2 = y1*0.5f + std::get<2>(p2)*fac*0.5f;
+          }
+
+          const auto len01 = std::sqrt((x1-x0)*(x1-x0)+(y1-y0)*(y1-y0));
+          const auto len12 = std::sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
+          const auto len = len01+len12;
+          const auto ts = 1.0f / std::max(4.0f, std::round(len*0.25f));
+          auto t = 0.0f;
+
+          // p(t) = (1-t)^2[p0] + 2t(1-t)[p1] + t^2[p2]
+          while ((t += ts) < 1.0f) {
+            const auto a = std::pow(1.0f-t, 2.0f);
+            const auto b = 2.0f*t*(1.0f-t);
+            const auto c = std::pow(t, 2.0f);
+            it.pts.push_back({true, a*x0+b*x1+c*x2, a*y0+b*y1+c*y2});
+          }
+        } while (cur++ != end);
+
+        beg = end+1;
+        it.cntrEnd.push_back(it.pts.size()-1);
+      }
     });
   }
 
