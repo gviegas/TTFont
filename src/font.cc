@@ -678,11 +678,15 @@ class SFNT {
     } while (flagN >= 0);
   }
 
+  /// Samples per pixel.
+  ///
+  static constexpr uint16_t SAA = 4;
+
   /// Scales an outline.
   /// TODO: Use 26.6 fixed point instead.
   ///
-  void scale(const Outline<int16_t>& src, Outline<float>& dst, uint16_t reso) {
-    const float fac = reso / (72.0f * _upem);
+  void scale(const Outline<int16_t>& src, Outline<float>& dst, float reso) {
+    const float fac = (std::max(1, SAA>>1)) * reso / (72.0f * _upem);
     dst.xMin = src.xMin * fac;
     dst.yMin = src.yMin * fac;
     dst.xMax = src.xMax * fac;
@@ -844,6 +848,34 @@ class SFNT {
         }
         bmap[y*w+x] = wind != 0 ? 255 : 0;
       }
+    }
+
+    switch (SAA) {
+      case 1:
+        break;
+
+      case 4: {
+        const uint16_t ds = SAA>>1;
+        const uint16_t dw = w / ds;
+        const uint16_t dh = h / ds;
+        auto dbm = new uint8_t[dw*dh];
+        for (uint16_t y = 0; y < dh; ++y) {
+          for (uint16_t x = 0; x < dw; ++x) {
+            const float s1 = bmap[ds*(y*w+x)];
+            const float s2 = bmap[ds*(y*w+x+1)];
+            const float s3 = bmap[ds*((y+1)*w+x)];
+            const float s4 = bmap[ds*((y+1)*w+x+1)];
+            dbm[y*dw+x] = (s1+s2+s3+s4) / 4.0f;
+          }
+        }
+        delete[] bmap;
+        return std::unique_ptr<Glyph>{new SFNTGlyph{{dw, dh}, dbm}};
+      }
+
+      // TODO: Other SAA values.
+
+      default:
+        std::abort();
     }
 
     return std::unique_ptr<Glyph>{new SFNTGlyph{{w, h}, bmap}};
